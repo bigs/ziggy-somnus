@@ -3,66 +3,89 @@ const testing = std.testing;
 const mecha = @import("mecha");
 const mascii = mecha.ascii;
 
+pub fn parse_symbolic(_: std.mem.Allocator, input: []const u8) mecha.Error!mecha.Result(u8) {
+    if (input.len == 0) {
+        return mecha.Error.ParserFailed;
+    }
+
+    const value = input[0];
+    const rest = input[1..];
+
+    if (!std.ascii.isPrint(value) or std.ascii.isWhitespace(value)) {
+        return mecha.Error.ParserFailed;
+    }
+
+    return mecha.Result(u8){
+        .value = value,
+        .rest = rest,
+    };
+}
+
+pub const symbolic = mecha.Parser(u8){ .parse = parse_symbolic };
+pub const symbolic_string = mecha.many(symbolic, .{ .collect = false, .min = 1 });
+
 pub const IrcMessageType = enum {
-    PRIVMSG,
-    NOTICE,
-    JOIN,
-    PART,
-    QUIT,
-    NICK,
-    MODE,
-    TOPIC,
-    KICK,
-    PING,
-    PONG,
+    privmsg,
+    notice,
+    join,
+    part,
+    quit,
+    nick,
+    mode,
+    topic,
+    kick,
+    ping,
+    pong,
 };
 
-pub const IrcMessage = union(IrcMessageType) {
-    PRIVMSG: struct {
+pub const Privmsg = struct {
+    sender: []const u8,
+    target: []const u8,
+    message: []const u8,
+};
+
+pub const IrcServerMessage = union(IrcMessageType) {
+    privmsg: Privmsg,
+    notice: struct {
         sender: []const u8,
         target: []const u8,
         message: []const u8,
     },
-    NOTICE: struct {
-        sender: []const u8,
-        target: []const u8,
-        message: []const u8,
-    },
-    JOIN: struct {
+    join: struct {
         channel: []const u8,
         user: []const u8,
     },
-    PART: struct {
+    part: struct {
         channel: []const u8,
         user: []const u8,
         reason: ?[]const u8,
     },
-    QUIT: struct {
+    quit: struct {
         user: []const u8,
         reason: ?[]const u8,
     },
-    NICK: struct {
+    nick: struct {
         old_nick: []const u8,
         new_nick: []const u8,
     },
-    MODE: struct {
+    mode: struct {
         target: []const u8,
         mode: []const u8,
         params: ?[]const u8,
     },
-    TOPIC: struct {
+    topic: struct {
         channel: []const u8,
         topic: []const u8,
     },
-    KICK: struct {
+    kick: struct {
         channel: []const u8,
         user: []const u8,
         reason: ?[]const u8,
     },
-    PING: struct {
+    ping: struct {
         server: []const u8,
     },
-    PONG: struct {
+    pong: struct {
         server: []const u8,
     },
 };
@@ -154,13 +177,23 @@ test "user" {
     try testing.expectEqualStrings("foo", result.value);
 }
 
-const host_symbols: mecha.Parser(u8) = mascii.not(mascii.whitespace);
-const host: mecha.Parser([]const u8) = mecha.many(host_symbols, .{ .min = 1, .collect = false });
+const host: mecha.Parser([]const u8) = mecha.many(symbolic, .{ .min = 1, .collect = false });
 
 pub const IrcUser = struct {
     nick: []const u8,
     user: []const u8,
     host: []const u8,
+
+    pub fn to_string(self: IrcUser, alloc: std.mem.Allocator) ![]u8 {
+        var buf = try std.ArrayList(u8).initCapacity(alloc, self.nick.len + 1 + self.user.len + 1 + self.host.len);
+        try buf.appendSlice(self.nick);
+        try buf.append('!');
+        try buf.appendSlice(self.user);
+        try buf.append('@');
+        try buf.appendSlice(self.host);
+
+        return buf.toOwnedSlice();
+    }
 };
 
 pub const irc_user = mecha.map(mecha.combine(.{
@@ -183,6 +216,10 @@ test "IrcUser" {
         try testing.expectEqualStrings("nick", result.value.nick);
         try testing.expectEqualStrings("user", result.value.user);
         try testing.expectEqualStrings("host.com", result.value.host);
+
+        const string = try result.value.to_string(alloc);
+        defer alloc.free(string);
+        try testing.expectEqualStrings("nick!user@host.com", string);
     }
 
     {
@@ -190,6 +227,52 @@ test "IrcUser" {
 
         const input = "nick!user";
         const result = irc_user.parse(alloc, input);
+        try testing.expectError(mecha.Error.ParserFailed, result);
+    }
+
+    {
+        const alloc = testing.allocator;
+
+        const input = "nick!user@host.com PRIVMSG";
+        const result = try irc_user.asStr().parse(alloc, input);
+        try testing.expectEqualStrings("nick!user@host.com", result.value);
+    }
+}
+
+pub const msg_target: mecha.Parser([]const u8) = mecha.many(symbolic, .{ .collect = false, .min = 1 });
+
+pub const privmsg = mecha.combine(.{ mascii.char(':').discard(), irc_user.asStr(), mecha.string(" PRIVMSG ").discard(), symbolic_string, mecha.string(" :").discard(), mecha.many(mascii.not(mascii.control), .{ .min = 1, .collect = false }), mecha.string("\r\n").discard() }).map(mecha.toStruct(Privmsg)).map(struct {
+    fn map(x: Privmsg) IrcServerMessage {
+        return IrcServerMessage{ .privmsg = x };
+    }
+}.map);
+
+test "privmsg" {
+    {
+        const alloc = testing.allocator;
+
+        const input = ":nick!user@host.com PRIVMSG #room :sup jies\r\n";
+        const result = try privmsg.parse(alloc, input);
+
+        try testing.expect(result.value == .privmsg);
+        try testing.expectEqualStrings("nick!user@host.com", result.value.privmsg.sender);
+        try testing.expectEqualStrings("#room", result.value.privmsg.target);
+        try testing.expectEqualStrings("sup jies", result.value.privmsg.message);
+    }
+
+    {
+        const alloc = testing.allocator;
+
+        const input = ":nick!user@host.com PRIVMSG #room :sup jies";
+        const result = privmsg.parse(alloc, input);
+        try testing.expectError(mecha.Error.ParserFailed, result);
+    }
+
+    {
+        const alloc = testing.allocator;
+
+        const input = ":nick!user@host.com #room :sup jies\r\n";
+        const result = privmsg.parse(alloc, input);
         try testing.expectError(mecha.Error.ParserFailed, result);
     }
 }
