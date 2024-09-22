@@ -38,14 +38,12 @@ pub const IrcMessageType = enum {
     pong,
 };
 
-pub const Privmsg = struct {
-    sender: []const u8,
-    target: []const u8,
-    message: []const u8,
-};
-
 pub const IrcServerMessage = union(IrcMessageType) {
-    privmsg: Privmsg,
+    privmsg: struct {
+        sender: []const u8,
+        target: []const u8,
+        message: []const u8,
+    },
     notice: struct {
         sender: []const u8,
         target: []const u8,
@@ -239,13 +237,82 @@ test "IrcUser" {
     }
 }
 
+fn ToStructResult(comptime T: type) type {
+    return @TypeOf(struct {
+        fn func(_: anytype) T {
+            return undefined;
+        }
+    }.func);
+}
+
+fn enum_string_name(comptime t: anytype) []const u8 {
+    const T = @TypeOf(t);
+    const type_info = @typeInfo(T);
+
+    // Ensure that T is an enum
+    if (type_info != .Enum) @compileError("Function expects an enum type");
+
+    inline for (type_info.Enum.fields) |field| {
+        if (@field(T, field.name) == t) {
+            return field.name;
+        }
+    }
+
+    // This should never be reached if t is a valid enum value
+    @compileError("Invalid enum value");
+}
+
+fn toTaggedStruct(comptime T: type, comptime index: anytype) ToStructResult(T) {
+    return struct {
+        fn func(tuple: anytype) T {
+            const info = @typeInfo(T);
+            const union_fields = info.Union.fields;
+            const enum_name = comptime enum_string_name(index);
+
+            inline for (union_fields) |field| {
+                if (comptime std.mem.eql(u8, field.name, enum_name)) {
+                    const sub_struct_info = @typeInfo(field.type);
+                    const sub_struct_fields = sub_struct_info.Struct.fields;
+
+                    if (sub_struct_fields.len != tuple.len)
+                        @compileError(@typeName(T) ++ "(" ++ enum_name ++ ") and " ++ @typeName(@TypeOf(tuple)) ++ " does not have " ++
+                            "same number of fields. Conversion is not possible.");
+
+                    var sub_struct: field.type = undefined;
+
+                    inline for (sub_struct_fields, 0..) |sub_field, i| {
+                        @field(sub_struct, sub_field.name) = tuple[i];
+                    }
+
+                    return @unionInit(T, enum_name, sub_struct);
+                }
+            }
+
+            @compileError("Failed to find enum in union type");
+        }
+    }.func;
+}
+
+test "toTaggedStruct" {
+    const x: IrcServerMessage = toTaggedStruct(IrcServerMessage, IrcMessageType.privmsg)(.{ "nick!user@host.com", "#room", "sup jies" });
+
+    try testing.expect(x == .privmsg);
+    try testing.expectEqualStrings("#room", x.privmsg.target);
+}
+
 pub const msg_target: mecha.Parser([]const u8) = mecha.many(symbolic, .{ .collect = false, .min = 1 });
 
-pub const privmsg = mecha.combine(.{ mascii.char(':').discard(), irc_user.asStr(), mecha.string(" PRIVMSG ").discard(), symbolic_string, mecha.string(" :").discard(), mecha.many(mascii.not(mascii.control), .{ .min = 1, .collect = false }), mecha.string("\r\n").discard() }).map(mecha.toStruct(Privmsg)).map(struct {
-    fn map(x: Privmsg) IrcServerMessage {
-        return IrcServerMessage{ .privmsg = x };
-    }
-}.map);
+const parse_privmsg = .{
+    mascii.char(':').discard(),
+    irc_user.asStr(),
+    mecha.string(" PRIVMSG ").discard(),
+    msg_target,
+    mecha.string(" :").discard(),
+    mecha.many(mascii.not(mascii.control), .{ .collect = false, .min = 1 }),
+    mecha.string("\r\n").discard(),
+};
+
+pub const privmsg = mecha.combine(parse_privmsg).map(toTaggedStruct(IrcServerMessage, IrcMessageType.privmsg));
 
 test "privmsg" {
     {
