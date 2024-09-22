@@ -297,7 +297,9 @@ test "toTaggedStruct" {
     const x: IrcServerMessage = toTaggedStruct(IrcServerMessage, IrcMessageType.privmsg)(.{ "nick!user@host.com", "#room", "sup jies" });
 
     try testing.expect(x == .privmsg);
+    try testing.expectEqualStrings("nick!user@host.com", x.privmsg.sender);
     try testing.expectEqualStrings("#room", x.privmsg.target);
+    try testing.expectEqualStrings("sup jies", x.privmsg.message);
 }
 
 pub const msg_target: mecha.Parser([]const u8) = mecha.many(symbolic, .{ .collect = false, .min = 1 });
