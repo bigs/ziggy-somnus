@@ -395,6 +395,26 @@ pub const kick = mecha.combine(.{
     mecha.string("\r\n").discard(),
 }).map(toTaggedStruct(IrcServerMessage, IrcMessageType.kick));
 
+pub const ping = mecha.combine(.{
+    mecha.string("PING :").discard(),
+    symbolic_string,
+    mecha.string("\r\n").discard(),
+}).map(struct {
+    fn map(server: []const u8) IrcServerMessage {
+        return IrcServerMessage{ .ping = .{ .server = server } };
+    }
+}.map);
+
+pub const pong = mecha.combine(.{
+    mecha.string("PONG ").discard(),
+    symbolic_string,
+    mecha.string("\r\n").discard(),
+}).map(struct {
+    fn map(server: []const u8) IrcServerMessage {
+        return IrcServerMessage{ .pong = .{ .server = server } };
+    }
+}.map);
+
 test "privmsg" {
     {
         const alloc = testing.allocator;
@@ -578,4 +598,24 @@ test "kick" {
         try testing.expectEqualStrings("user", result.value.kick.user);
         try testing.expectEqual(null, result.value.kick.reason);
     }
+}
+
+test "ping" {
+    const alloc = testing.allocator;
+
+    const input = "PING :server.example.com\r\n";
+    const result = try ping.parse(alloc, input);
+
+    try testing.expect(result.value == .ping);
+    try testing.expectEqualStrings("server.example.com", result.value.ping.server);
+}
+
+test "pong" {
+    const alloc = testing.allocator;
+
+    const input = "PONG server.example.com\r\n";
+    const result = try pong.parse(alloc, input);
+
+    try testing.expect(result.value == .pong);
+    try testing.expectEqualStrings("server.example.com", result.value.pong.server);
 }
