@@ -3,27 +3,6 @@ const testing = std.testing;
 const mecha = @import("mecha");
 const mascii = mecha.ascii;
 
-pub fn parse_symbolic(_: std.mem.Allocator, input: []const u8) mecha.Error!mecha.Result(u8) {
-    if (input.len == 0) {
-        return mecha.Error.ParserFailed;
-    }
-
-    const value = input[0];
-    const rest = input[1..];
-
-    if (!std.ascii.isPrint(value) or std.ascii.isWhitespace(value)) {
-        return mecha.Error.ParserFailed;
-    }
-
-    return mecha.Result(u8){
-        .value = value,
-        .rest = rest,
-    };
-}
-
-pub const symbolic = mecha.Parser(u8){ .parse = parse_symbolic };
-pub const symbolic_string = mecha.many(symbolic, .{ .collect = false, .min = 1 });
-
 pub const IrcMessageType = enum {
     privmsg,
     notice,
@@ -54,8 +33,8 @@ pub const IrcServerMessage = union(IrcMessageType) {
         user: []const u8,
     },
     part: struct {
-        channel: []const u8,
         user: []const u8,
+        channel: []const u8,
         reason: ?[]const u8,
     },
     quit: struct {
@@ -87,6 +66,27 @@ pub const IrcServerMessage = union(IrcMessageType) {
         server: []const u8,
     },
 };
+
+pub fn parse_symbolic(_: std.mem.Allocator, input: []const u8) mecha.Error!mecha.Result(u8) {
+    if (input.len == 0) {
+        return mecha.Error.ParserFailed;
+    }
+
+    const value = input[0];
+    const rest = input[1..];
+
+    if (!std.ascii.isPrint(value) or std.ascii.isWhitespace(value)) {
+        return mecha.Error.ParserFailed;
+    }
+
+    return mecha.Result(u8){
+        .value = value,
+        .rest = rest,
+    };
+}
+
+pub const symbolic = mecha.Parser(u8){ .parse = parse_symbolic };
+pub const symbolic_string = mecha.many(symbolic, .{ .collect = false, .min = 1 });
 
 const nickname_symbols: mecha.Parser(u8) = mecha.oneOf(.{
     mascii.char('['),
@@ -304,17 +304,50 @@ test "toTaggedStruct" {
 
 pub const msg_target: mecha.Parser([]const u8) = mecha.many(symbolic, .{ .collect = false, .min = 1 });
 
-const parse_privmsg = .{
-    mascii.char(':').discard(),
-    irc_user.asStr(),
-    mecha.string(" PRIVMSG ").discard(),
-    msg_target,
+fn parse_message(comptime msg_type: IrcMessageType) mecha.Parser(IrcServerMessage) {
+    const msg_type_string = comptime enum_string_name(msg_type);
+    var msg_type_caps: [msg_type_string.len]u8 = undefined;
+    for (msg_type_string, 0..) |char, i| {
+        msg_type_caps[i] = std.ascii.toUpper(char);
+    }
+
+    const parser = mecha.combine(.{
+        mascii.char(':').discard(),
+        irc_user.asStr(),
+        mecha.string(" " ++ msg_type_caps ++ " ").discard(),
+        msg_target,
+        mecha.string(" :").discard(),
+        mecha.many(mascii.not(mascii.control), .{ .collect = false, .min = 1 }),
+        mecha.string("\r\n").discard(),
+    });
+
+    return parser.map(toTaggedStruct(IrcServerMessage, msg_type));
+}
+
+pub const privmsg = parse_message(IrcMessageType.privmsg);
+pub const notice = parse_message(IrcMessageType.notice);
+
+const parse_opt_message = mecha.combine(.{
     mecha.string(" :").discard(),
     mecha.many(mascii.not(mascii.control), .{ .collect = false, .min = 1 }),
-    mecha.string("\r\n").discard(),
-};
+}).opt();
 
-pub const privmsg = mecha.combine(parse_privmsg).map(toTaggedStruct(IrcServerMessage, IrcMessageType.privmsg));
+pub const part = mecha.combine(.{
+    mascii.char(':').discard(),
+    irc_user.asStr(),
+    mecha.string(" PART ").discard(),
+    msg_target,
+    parse_opt_message,
+    mecha.string("\r\n").discard(),
+}).map(toTaggedStruct(IrcServerMessage, IrcMessageType.part));
+
+pub const quit = mecha.combine(.{
+    mascii.char(':').discard(),
+    irc_user.asStr(),
+    mecha.string(" QUIT").discard(),
+    parse_opt_message,
+    mecha.string("\r\n").discard(),
+}).map(toTaggedStruct(IrcServerMessage, IrcMessageType.quit));
 
 test "privmsg" {
     {
@@ -343,5 +376,57 @@ test "privmsg" {
         const input = ":nick!user@host.com #room :sup jies\r\n";
         const result = privmsg.parse(alloc, input);
         try testing.expectError(mecha.Error.ParserFailed, result);
+    }
+}
+
+test "part" {
+    {
+        const alloc = testing.allocator;
+
+        const input = ":nick!user@host.com PART #room :test\r\n";
+        const result = try part.parse(alloc, input);
+
+        try testing.expect(result.value == .part);
+        try testing.expectEqualStrings("nick!user@host.com", result.value.part.user);
+        try testing.expectEqualStrings("#room", result.value.part.channel);
+        const reason = result.value.part.reason orelse "fail";
+        try testing.expect(std.mem.eql(u8, reason, "test"));
+    }
+
+    {
+        const alloc = testing.allocator;
+
+        const input = ":nick!user@host.com PART #room\r\n";
+        const result = try part.parse(alloc, input);
+
+        try testing.expect(result.value == .part);
+        try testing.expectEqualStrings("nick!user@host.com", result.value.part.user);
+        try testing.expectEqualStrings("#room", result.value.part.channel);
+        try testing.expectEqual(null, result.value.part.reason);
+    }
+}
+
+test "quit" {
+    {
+        const alloc = testing.allocator;
+
+        const input = ":nick!user@host.com QUIT :test\r\n";
+        const result = try quit.parse(alloc, input);
+
+        try testing.expect(result.value == .quit);
+        try testing.expectEqualStrings("nick!user@host.com", result.value.quit.user);
+        const reason = result.value.quit.reason orelse "fail";
+        try testing.expect(std.mem.eql(u8, reason, "test"));
+    }
+
+    {
+        const alloc = testing.allocator;
+
+        const input = ":nick!user@host.com QUIT\r\n";
+        const result = try quit.parse(alloc, input);
+
+        try testing.expect(result.value == .quit);
+        try testing.expectEqualStrings("nick!user@host.com", result.value.quit.user);
+        try testing.expectEqual(null, result.value.quit.reason);
     }
 }
