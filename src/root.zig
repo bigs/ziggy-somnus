@@ -52,10 +52,12 @@ pub const IrcServerMessage = union(IrcMessageType) {
         params: ?[]const u8,
     },
     topic: struct {
+        user: []const u8,
         channel: []const u8,
         topic: []const u8,
     },
     kick: struct {
+        sender: []const u8,
         channel: []const u8,
         user: []const u8,
         reason: ?[]const u8,
@@ -372,6 +374,27 @@ pub const mode = mecha.combine(.{
     mecha.string("\r\n").discard(),
 }).map(toTaggedStruct(IrcServerMessage, IrcMessageType.mode));
 
+pub const topic = mecha.combine(.{
+    mascii.char(':').discard(),
+    irc_user.asStr(),
+    mecha.string(" TOPIC ").discard(),
+    msg_target,
+    mecha.string(" :").discard(),
+    mecha.many(mascii.not(mascii.control), .{ .collect = false, .min = 1 }),
+    mecha.string("\r\n").discard(),
+}).map(toTaggedStruct(IrcServerMessage, IrcMessageType.topic));
+
+pub const kick = mecha.combine(.{
+    mascii.char(':').discard(),
+    irc_user.asStr(),
+    mecha.string(" KICK ").discard(),
+    msg_target,
+    mecha.string(" ").discard(),
+    nickname,
+    parse_opt_message,
+    mecha.string("\r\n").discard(),
+}).map(toTaggedStruct(IrcServerMessage, IrcMessageType.kick));
+
 test "privmsg" {
     {
         const alloc = testing.allocator;
@@ -514,5 +537,45 @@ test "mode" {
         try testing.expectEqualStrings("#channel", result.value.mode.target);
         try testing.expectEqualStrings("+b", result.value.mode.mode);
         try testing.expectEqualStrings("*!*@*.example.com", result.value.mode.params.?);
+    }
+}
+
+test "topic" {
+    const alloc = testing.allocator;
+
+    const input = ":nick!user@host.com TOPIC #channel :New channel topic\r\n";
+    const result = try topic.parse(alloc, input);
+
+    try testing.expect(result.value == .topic);
+    try testing.expectEqualStrings("nick!user@host.com", result.value.topic.user);
+    try testing.expectEqualStrings("#channel", result.value.topic.channel);
+    try testing.expectEqualStrings("New channel topic", result.value.topic.topic);
+}
+
+test "kick" {
+    {
+        const alloc = testing.allocator;
+
+        const input = ":nick!user@host.com KICK #channel user :Reason for kick\r\n";
+        const result = try kick.parse(alloc, input);
+
+        try testing.expect(result.value == .kick);
+        try testing.expectEqualStrings("nick!user@host.com", result.value.kick.sender);
+        try testing.expectEqualStrings("#channel", result.value.kick.channel);
+        try testing.expectEqualStrings("user", result.value.kick.user);
+        try testing.expectEqualStrings("Reason for kick", result.value.kick.reason.?);
+    }
+
+    {
+        const alloc = testing.allocator;
+
+        const input = ":nick!user@host.com KICK #channel user\r\n";
+        const result = try kick.parse(alloc, input);
+
+        try testing.expect(result.value == .kick);
+        try testing.expectEqualStrings("nick!user@host.com", result.value.kick.sender);
+        try testing.expectEqualStrings("#channel", result.value.kick.channel);
+        try testing.expectEqualStrings("user", result.value.kick.user);
+        try testing.expectEqual(null, result.value.kick.reason);
     }
 }
