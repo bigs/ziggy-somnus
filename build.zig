@@ -18,10 +18,6 @@ pub fn build(b: *std.Build) void {
     // Dependencies
     const mecha_package = b.dependency("mecha", .{ .target = target, .optimize = optimize });
 
-    // Add dependencies to the build
-    // b.addModule("mecha", mecha.module("mecha"));
-    // b.addModule("mecha", .{});
-
     // Library
     const lib = b.addStaticLibrary(.{
         .name = "ziggy-somnus",
