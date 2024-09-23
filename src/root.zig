@@ -46,6 +46,7 @@ pub const IrcServerMessage = union(IrcMessageType) {
         new_nick: []const u8,
     },
     mode: struct {
+        user: []const u8,
         target: []const u8,
         mode: []const u8,
         params: ?[]const u8,
@@ -357,6 +358,20 @@ pub const nick = mecha.combine(.{
     mecha.string("\r\n").discard(),
 }).map(toTaggedStruct(IrcServerMessage, IrcMessageType.nick));
 
+pub const mode = mecha.combine(.{
+    mascii.char(':').discard(),
+    irc_user.asStr(),
+    mecha.string(" MODE ").discard(),
+    msg_target,
+    mecha.string(" ").discard(),
+    symbolic_string,
+    mecha.opt(mecha.combine(.{
+        mecha.string(" ").discard(),
+        mecha.many(mascii.not(mascii.control), .{ .collect = false, .min = 1 }),
+    })),
+    mecha.string("\r\n").discard(),
+}).map(toTaggedStruct(IrcServerMessage, IrcMessageType.mode));
+
 test "privmsg" {
     {
         const alloc = testing.allocator;
@@ -448,4 +463,56 @@ test "nick" {
     try testing.expect(result.value == .nick);
     try testing.expectEqualStrings("oldnick!user@host.com", result.value.nick.old_nick);
     try testing.expectEqualStrings("newnick", result.value.nick.new_nick);
+}
+
+test "mode" {
+    const alloc = testing.allocator;
+
+    // User mode
+    {
+        const input = ":nick!user@host.com MODE nick +i\r\n";
+        const result = try mode.parse(alloc, input);
+
+        try testing.expect(result.value == .mode);
+        try testing.expectEqualStrings("nick!user@host.com", result.value.mode.user);
+        try testing.expectEqualStrings("nick", result.value.mode.target);
+        try testing.expectEqualStrings("+i", result.value.mode.mode);
+        try testing.expectEqual(null, result.value.mode.params);
+    }
+
+    // Channel mode without params
+    {
+        const input = ":nick!user@host.com MODE #channel +m\r\n";
+        const result = try mode.parse(alloc, input);
+
+        try testing.expect(result.value == .mode);
+        try testing.expectEqualStrings("nick!user@host.com", result.value.mode.user);
+        try testing.expectEqualStrings("#channel", result.value.mode.target);
+        try testing.expectEqualStrings("+m", result.value.mode.mode);
+        try testing.expectEqual(null, result.value.mode.params);
+    }
+
+    // Channel mode with params
+    {
+        const input = ":nick!user@host.com MODE #channel +o othernick\r\n";
+        const result = try mode.parse(alloc, input);
+
+        try testing.expect(result.value == .mode);
+        try testing.expectEqualStrings("nick!user@host.com", result.value.mode.user);
+        try testing.expectEqualStrings("#channel", result.value.mode.target);
+        try testing.expectEqualStrings("+o", result.value.mode.mode);
+        try testing.expectEqualStrings("othernick", result.value.mode.params.?);
+    }
+
+    // Channel mode with mask
+    {
+        const input = ":nick!user@host.com MODE #channel +b *!*@*.example.com\r\n";
+        const result = try mode.parse(alloc, input);
+
+        try testing.expect(result.value == .mode);
+        try testing.expectEqualStrings("nick!user@host.com", result.value.mode.user);
+        try testing.expectEqualStrings("#channel", result.value.mode.target);
+        try testing.expectEqualStrings("+b", result.value.mode.mode);
+        try testing.expectEqualStrings("*!*@*.example.com", result.value.mode.params.?);
+    }
 }
