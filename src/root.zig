@@ -380,7 +380,7 @@ pub const topic = mecha.combine(.{
     mecha.string(" TOPIC ").discard(),
     msg_target,
     mecha.string(" :").discard(),
-    mecha.many(mascii.not(mascii.control), .{ .collect = false, .min = 1 }),
+    mecha.many(mascii.not(mascii.control), .{ .collect = false, .min = 0 }),
     mecha.string("\r\n").discard(),
 }).map(toTaggedStruct(IrcServerMessage, IrcMessageType.topic));
 
