@@ -70,7 +70,7 @@ pub const IrcServerMessage = union(IrcMessageType) {
     },
 };
 
-pub fn parse_symbolic(_: std.mem.Allocator, input: []const u8) mecha.Error!mecha.Result(u8) {
+fn parse_symbolic(_: std.mem.Allocator, input: []const u8) mecha.Error!mecha.Result(u8) {
     if (input.len == 0) {
         return mecha.Error.ParserFailed;
     }
@@ -88,8 +88,8 @@ pub fn parse_symbolic(_: std.mem.Allocator, input: []const u8) mecha.Error!mecha
     };
 }
 
-pub const symbolic = mecha.Parser(u8){ .parse = parse_symbolic };
-pub const symbolic_string = mecha.many(symbolic, .{ .collect = false, .min = 1 });
+const symbolic = mecha.Parser(u8){ .parse = parse_symbolic };
+const symbolic_string = mecha.many(symbolic, .{ .collect = false, .min = 1 });
 
 const nickname_symbols: mecha.Parser(u8) = mecha.oneOf(.{
     mascii.char('['),
@@ -205,8 +205,6 @@ pub const irc_user = mecha.map(mecha.combine(.{
     host,
 }), mecha.toStruct(IrcUser));
 
-pub const Delim = mecha.string("\r\n");
-
 test "IrcUser" {
     {
         const alloc = testing.allocator;
@@ -305,7 +303,7 @@ test "toTaggedStruct" {
     try testing.expectEqualStrings("sup jies", x.privmsg.message);
 }
 
-pub const msg_target: mecha.Parser([]const u8) = mecha.many(symbolic, .{ .collect = false, .min = 1 });
+const msg_target: mecha.Parser([]const u8) = mecha.many(symbolic, .{ .collect = false, .min = 1 });
 
 fn parse_message(comptime msg_type: IrcMessageType) mecha.Parser(IrcServerMessage) {
     const msg_type_string = comptime enum_string_name(msg_type);
