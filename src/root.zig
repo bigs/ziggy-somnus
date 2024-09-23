@@ -349,6 +349,14 @@ pub const quit = mecha.combine(.{
     mecha.string("\r\n").discard(),
 }).map(toTaggedStruct(IrcServerMessage, IrcMessageType.quit));
 
+pub const nick = mecha.combine(.{
+    mascii.char(':').discard(),
+    irc_user.asStr(),
+    mecha.string(" NICK ").discard(),
+    nickname,
+    mecha.string("\r\n").discard(),
+}).map(toTaggedStruct(IrcServerMessage, IrcMessageType.nick));
+
 test "privmsg" {
     {
         const alloc = testing.allocator;
@@ -429,4 +437,15 @@ test "quit" {
         try testing.expectEqualStrings("nick!user@host.com", result.value.quit.user);
         try testing.expectEqual(null, result.value.quit.reason);
     }
+}
+
+test "nick" {
+    const alloc = testing.allocator;
+
+    const input = ":oldnick!user@host.com NICK newnick\r\n";
+    const result = try nick.parse(alloc, input);
+
+    try testing.expect(result.value == .nick);
+    try testing.expectEqualStrings("oldnick!user@host.com", result.value.nick.old_nick);
+    try testing.expectEqualStrings("newnick", result.value.nick.new_nick);
 }
