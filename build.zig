@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const module = b.addModule("somnus", .{ .root_source_file = b.path("src/root.zig") });
+    const module = b.addModule("ziggy-somnus", .{ .root_source_file = b.path("src/root.zig") });
 
     // Dependencies
     const mecha_package = b.dependency("mecha", .{ .target = target, .optimize = optimize });
@@ -80,7 +80,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    lib_unit_tests.root_module.addImport("somnus", module);
+    lib_unit_tests.root_module.addImport("ziggy-somnus", module);
     lib_unit_tests.root_module.addImport("mecha", mecha_package.module("mecha"));
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
@@ -91,6 +91,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    exe_unit_tests.root_module.addImport("ziggy-somnus", module);
     exe_unit_tests.root_module.addImport("mecha", mecha_package.module("mecha"));
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
