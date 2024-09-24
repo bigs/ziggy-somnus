@@ -108,10 +108,6 @@ const nickname_char: mecha.Parser(u8) = mecha.oneOf(.{
     mascii.alphanumeric,
 });
 
-test "fail" {
-    try testing.expect(false);
-}
-
 const nickname_first_char: mecha.Parser([]u8) = mecha.many(mecha.oneOf(.{ mascii.alphabetic, nickname_symbols }), .{ .min = 1, .max = 1 });
 const nickname_chars: mecha.Parser([]u8) = mecha.many(nickname_char, .{ .max = 8 });
 
