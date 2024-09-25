@@ -1,105 +1,15 @@
 const std = @import("std");
 const mecha = @import("mecha");
 const somnus = @import("ziggy-somnus");
+const commands = @import("commands.zig");
+const linebuffer = @import("line_buffer.zig");
+const parser = somnus.parser;
 const atomic = std.atomic;
 const net = std.net;
 const builtin = std.builtin;
 const testing = std.testing;
 
-fn LineBuffer(comptime n: usize) type {
-    return struct { buf: [n]u8 = undefined, len: usize = 0, mut: std.Thread.Mutex = .{} };
-}
-
-// SPSC Ring Buffer
-fn LineBufferRing(comptime n: usize) type {
-    return struct {
-        const Self = @This();
-
-        bufs: [n]LineBuffer(512),
-        head: atomic.Value(u8),
-        tail: atomic.Value(u8),
-        allocator: std.mem.Allocator,
-
-        fn init(allocator: std.mem.Allocator) !*Self {
-            const line_buffer_ring = try allocator.create(Self);
-            for (&line_buffer_ring.bufs) |*buf| {
-                buf.* = .{};
-            }
-            line_buffer_ring.head = atomic.Value(u8).init(0);
-            line_buffer_ring.tail = atomic.Value(u8).init(0);
-            line_buffer_ring.allocator = allocator;
-
-            return line_buffer_ring;
-        }
-
-        fn deinit(self: *Self) void {
-            self.allocator.destroy(self);
-        }
-
-        fn acquire(self: *Self) ?*LineBuffer(512) {
-            const tail = self.tail.load(.acquire);
-            const next = (tail + 1) % @as(u8, n);
-            if (next == self.head.load(.acquire)) {
-                return null;
-            }
-            if (!self.bufs[tail].mut.tryLock()) {
-                return null;
-            }
-            if (self.tail.cmpxchgStrong(tail, next, .acq_rel, .acquire)) |_| {
-                self.bufs[tail].mut.unlock();
-                return null;
-            }
-            return &self.bufs[tail];
-        }
-
-        fn consume(self: *Self) ?*LineBuffer(512) {
-            const head = self.head.load(.acquire);
-            if (head == self.tail.load(.acquire)) {
-                return null;
-            }
-            const next = (head + 1) % @as(u8, n);
-            if (!self.bufs[head].mut.tryLock()) {
-                return null;
-            }
-            if (self.head.cmpxchgStrong(head, next, .acq_rel, .acquire)) |_| {
-                self.bufs[head].mut.unlock();
-                return null;
-            }
-            return &self.bufs[head];
-        }
-    };
-}
-
-test "LineBuffer" {
-    const allocator = testing.allocator;
-    const line_buffer_ring = try LineBufferRing(16).init(allocator);
-    defer line_buffer_ring.deinit();
-
-    try testing.expectEqual(null, line_buffer_ring.consume());
-
-    const buf = line_buffer_ring.acquire();
-    try testing.expect(buf != null);
-    try testing.expectEqual(false, buf.?.mut.tryLock());
-}
-
-fn read_loop(reader: net.Stream.Reader, buffer_ring: *LineBufferRing(16)) !void {
-    while (true) {
-        if (buffer_ring.acquire()) |buf| {
-            defer buf.mut.unlock();
-            while (true) {
-                const result = reader.readUntilDelimiter(&buf.buf, '\n');
-                const read = result catch |err| switch (err) {
-                    error.StreamTooLong => continue,
-                    else => return err,
-                };
-                buf.len = read.len;
-                break;
-            }
-        } else {
-            std.atomic.spinLoopHint();
-        }
-    }
-}
+const LineBufferRing = linebuffer.LineBufferRing;
 
 const Args = struct {
     host: []const u8,
@@ -107,7 +17,6 @@ const Args = struct {
 };
 
 const Error = error{InvalidArgs};
-
 const ParseArgsError = Error || std.fmt.ParseIntError || std.process.ArgIterator.InitError;
 
 fn parse_args(allocator: std.mem.Allocator) ParseArgsError!Args {
@@ -123,6 +32,66 @@ fn parse_args(allocator: std.mem.Allocator) ParseArgsError!Args {
     const port = try std.fmt.parseUnsigned(u16, port_string, 10);
 
     return Args{ .host = host, .port = port };
+}
+
+fn read_loop(reader: net.Stream.Reader, buffer_ring: *LineBufferRing(16)) !void {
+    while (true) {
+        if (buffer_ring.acquire()) |buf| {
+            defer buf.mut.unlock();
+            while (true) {
+                const result = reader.readUntilDelimiter(&buf.buf, '\n');
+                const read = result catch |err| switch (err) {
+                    error.StreamTooLong => continue,
+                    else => return err,
+                };
+                // Add an extra byte for the delimiter
+                buf.len = @min(read.len + 1, 512);
+                break;
+            }
+        } else {
+            std.atomic.spinLoopHint();
+        }
+    }
+}
+
+fn irc_loop(allocator: std.mem.Allocator, writer: net.Stream.Writer, buffer_ring: *LineBufferRing(16)) !void {
+    const nick_string = try commands.nick(allocator, "smns");
+    std.debug.print("** Registering nick\n**** {s}", .{nick_string});
+    defer allocator.free(nick_string);
+    try writer.writeAll(nick_string);
+    const user_string = try commands.user(allocator, "smns", 0, "Somnus");
+    std.debug.print("** Registering user\n**** {s}", .{user_string});
+    defer allocator.free(user_string);
+    try writer.writeAll(user_string);
+
+    while (true) {
+        if (buffer_ring.consume()) |buf| {
+            defer buf.mut.unlock();
+            const line = buf.buf[0..buf.len];
+            const result = parser.parse_irc_message.parse(allocator, line) catch {
+                std.debug.print("** Error parsing message:\n**** {s}\n", .{line});
+                continue;
+            };
+            switch (result.value) {
+                .notice => |notice| {
+                    std.debug.print("** Notice received from {s} for {s}: {s}\n", .{ notice.sender, notice.target, notice.message });
+                },
+                .server => |server| {
+                    std.debug.print("** Server ({d:0>3}): {s}\n", .{ server.code, server.message });
+                },
+                .ping => |ping| {
+                    std.debug.print("** Ping? Pong!\n", .{});
+                    const pong_message = try commands.pong(allocator, ping.message);
+                    try writer.writeAll(pong_message);
+                },
+                else => {
+                    std.debug.print("** Got some other message\n", .{});
+                },
+            }
+        } else {
+            std.atomic.spinLoopHint();
+        }
+    }
 }
 
 pub fn main() !void {
@@ -141,14 +110,6 @@ pub fn main() !void {
     const args = try parse_args(allocator);
     const stream = try net.tcpConnectToHost(allocator, args.host, args.port);
     const read_thread = try std.Thread.spawn(spawn_config, read_loop, .{ stream.reader(), buffer_ring });
-    while (true) {
-        if (buffer_ring.consume()) |buf| {
-            defer buf.mut.unlock();
-            const line = buf.buf[0 .. buf.len - 1];
-            std.debug.print("**** {s}\n", .{line});
-        } else {
-            std.atomic.spinLoopHint();
-        }
-    }
+    try irc_loop(allocator, stream.writer(), buffer_ring);
     read_thread.join();
 }

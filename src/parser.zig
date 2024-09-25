@@ -4,6 +4,7 @@ const mecha = @import("mecha");
 const mascii = mecha.ascii;
 
 pub const IrcMessageType = enum {
+    server,
     privmsg,
     notice,
     join,
@@ -18,6 +19,12 @@ pub const IrcMessageType = enum {
 };
 
 pub const IrcServerMessage = union(IrcMessageType) {
+    server: struct {
+        server: []const u8,
+        code: u16,
+        user: []const u8,
+        message: []const u8,
+    },
     privmsg: struct {
         sender: []const u8,
         target: []const u8,
@@ -63,10 +70,10 @@ pub const IrcServerMessage = union(IrcMessageType) {
         reason: ?[]const u8,
     },
     ping: struct {
-        server: []const u8,
+        message: []const u8,
     },
     pong: struct {
-        server: []const u8,
+        message: []const u8,
     },
 };
 
@@ -329,6 +336,18 @@ fn parse_message(comptime msg_type: IrcMessageType, sender: mecha.Parser([]const
     return parser.map(toTaggedStruct(IrcServerMessage, msg_type));
 }
 
+pub const server = mecha.combine(.{
+    mascii.char(':').discard(),
+    host,
+    mascii.char(' ').discard(),
+    mecha.int(u16, .{ .parse_sign = false }),
+    mascii.char(' ').discard(),
+    nickname,
+    mascii.char(' ').discard(),
+    mecha.many(mascii.not(mascii.control), .{ .collect = false, .min = 1 }),
+    mecha.string("\r\n").discard(),
+}).map(toTaggedStruct(IrcServerMessage, IrcMessageType.server));
+
 pub const privmsg = parse_message(IrcMessageType.privmsg, irc_user.asStr());
 pub const notice = parse_message(IrcMessageType.notice, mecha.oneOf(.{ irc_user.asStr(), host }));
 
@@ -416,6 +435,21 @@ pub const pong = mecha.combine(.{
     symbolic_string,
     mecha.string("\r\n").discard(),
 }).map(toTaggedStruct(IrcServerMessage, IrcMessageType.pong));
+
+test "server" {
+    {
+        const alloc = testing.allocator;
+
+        const input = ":irc.test.com 266 user :Server message\r\n";
+        const result = try server.parse(alloc, input);
+
+        try testing.expectEqualStrings("irc.test.com", result.value.server.server);
+        try testing.expectEqual(266, result.value.server.code);
+        try testing.expectEqualStrings("user", result.value.server.user);
+        try testing.expectEqualStrings(":Server message", result.value.server.message);
+        try testing.expectEqualStrings("", result.rest);
+    }
+}
 
 test "privmsg" {
     {
@@ -622,7 +656,7 @@ test "ping" {
     const result = try ping.parse(alloc, input);
 
     try testing.expect(result.value == .ping);
-    try testing.expectEqualStrings("server.example.com", result.value.ping.server);
+    try testing.expectEqualStrings("server.example.com", result.value.ping.message);
 }
 
 test "pong" {
@@ -632,7 +666,7 @@ test "pong" {
     const result = try pong.parse(alloc, input);
 
     try testing.expect(result.value == .pong);
-    try testing.expectEqualStrings("server.example.com", result.value.pong.server);
+    try testing.expectEqualStrings("server.example.com", result.value.pong.message);
 }
 
-pub const parse_irc_message = mecha.oneOf(.{ privmsg, notice, join, part, quit, nick, mode, topic, kick, ping, pong });
+pub const parse_irc_message: mecha.Parser(IrcServerMessage) = mecha.oneOf(.{ server, privmsg, notice, join, part, quit, nick, mode, topic, kick, ping, pong });
