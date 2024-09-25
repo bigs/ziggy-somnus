@@ -29,8 +29,8 @@ pub const IrcServerMessage = union(IrcMessageType) {
         message: []const u8,
     },
     join: struct {
-        channel: []const u8,
         user: []const u8,
+        channel: []const u8,
     },
     part: struct {
         user: []const u8,
@@ -265,10 +265,14 @@ fn enum_string_name(comptime t: anytype) []const u8 {
 
 fn toTaggedStruct(comptime T: type, comptime index: anytype) ToStructResult(T) {
     return struct {
-        fn func(tuple: anytype) T {
+        fn func(input: anytype) T {
             const info = @typeInfo(T);
             const union_fields = info.Union.fields;
             const enum_name = comptime enum_string_name(index);
+            const InputType = @TypeOf(input);
+            const input_type = @typeInfo(InputType);
+
+            const tuple = if (!(input_type == .Struct and input_type.Struct.is_tuple)) struct { InputType }{input} else input;
 
             inline for (union_fields) |field| {
                 if (comptime std.mem.eql(u8, field.name, enum_name)) {
@@ -327,6 +331,14 @@ fn parse_message(comptime msg_type: IrcMessageType, sender: mecha.Parser([]const
 
 pub const privmsg = parse_message(IrcMessageType.privmsg, irc_user.asStr());
 pub const notice = parse_message(IrcMessageType.notice, mecha.oneOf(.{ irc_user.asStr(), host }));
+
+pub const join = mecha.combine(.{
+    mascii.char(':').discard(),
+    irc_user.asStr(),
+    mecha.string(" JOIN ").discard(),
+    msg_target,
+    mecha.string("\r\n").discard(),
+}).map(toTaggedStruct(IrcServerMessage, IrcMessageType.join));
 
 const parse_opt_message = mecha.combine(.{
     mecha.string(" :").discard(),
@@ -397,21 +409,13 @@ pub const ping = mecha.combine(.{
     mecha.string("PING :").discard(),
     symbolic_string,
     mecha.string("\r\n").discard(),
-}).map(struct {
-    fn map(server: []const u8) IrcServerMessage {
-        return IrcServerMessage{ .ping = .{ .server = server } };
-    }
-}.map);
+}).map(toTaggedStruct(IrcServerMessage, IrcMessageType.ping));
 
 pub const pong = mecha.combine(.{
     mecha.string("PONG ").discard(),
     symbolic_string,
     mecha.string("\r\n").discard(),
-}).map(struct {
-    fn map(server: []const u8) IrcServerMessage {
-        return IrcServerMessage{ .pong = .{ .server = server } };
-    }
-}.map);
+}).map(toTaggedStruct(IrcServerMessage, IrcMessageType.pong));
 
 test "privmsg" {
     {
@@ -440,6 +444,19 @@ test "privmsg" {
         const input = ":nick!user@host.com #room :sup jies\r\n";
         const result = privmsg.parse(alloc, input);
         try testing.expectError(mecha.Error.ParserFailed, result);
+    }
+}
+
+test "join" {
+    {
+        const alloc = testing.allocator;
+
+        const input = ":nick!user@host.com JOIN #room\r\n";
+        const result = try join.parse(alloc, input);
+
+        try testing.expect(result.value == .join);
+        try testing.expectEqualStrings("nick!user@host.com", result.value.join.user);
+        try testing.expectEqualStrings("#room", result.value.join.channel);
     }
 }
 
@@ -617,3 +634,5 @@ test "pong" {
     try testing.expect(result.value == .pong);
     try testing.expectEqualStrings("server.example.com", result.value.pong.server);
 }
+
+pub const parse_irc_message = mecha.oneOf(.{ privmsg, notice, join, part, quit, nick, mode, topic, kick, ping, pong });
