@@ -42,7 +42,9 @@ fn LineBufferRing(comptime n: usize) type {
             if (next == self.head.load(.acquire)) {
                 return null;
             }
-            self.bufs[tail].mut.lock();
+            if (!self.bufs[tail].mut.tryLock()) {
+                return null;
+            }
             if (self.tail.cmpxchgStrong(tail, next, .acq_rel, .acquire)) |_| {
                 self.bufs[tail].mut.unlock();
                 return null;
@@ -56,7 +58,9 @@ fn LineBufferRing(comptime n: usize) type {
                 return null;
             }
             const next = (head + 1) % @as(u8, n);
-            self.bufs[head].mut.lock();
+            if (!self.bufs[head].mut.tryLock()) {
+                return null;
+            }
             self.head.store(next, .release);
             if (self.head.cmpxchgStrong(head, next, .acq_rel, .acquire)) |_| {
                 self.bufs[head].mut.unlock();
