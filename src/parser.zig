@@ -305,7 +305,7 @@ test "toTaggedStruct" {
 
 const msg_target: mecha.Parser([]const u8) = mecha.many(symbolic, .{ .collect = false, .min = 1 });
 
-fn parse_message(comptime msg_type: IrcMessageType) mecha.Parser(IrcServerMessage) {
+fn parse_message(comptime msg_type: IrcMessageType, sender: mecha.Parser([]const u8)) mecha.Parser(IrcServerMessage) {
     const msg_type_string = comptime enum_string_name(msg_type);
     var msg_type_caps: [msg_type_string.len]u8 = undefined;
     for (msg_type_string, 0..) |char, i| {
@@ -314,7 +314,7 @@ fn parse_message(comptime msg_type: IrcMessageType) mecha.Parser(IrcServerMessag
 
     const parser = mecha.combine(.{
         mascii.char(':').discard(),
-        irc_user.asStr(),
+        sender,
         mecha.string(" " ++ msg_type_caps ++ " ").discard(),
         msg_target,
         mecha.string(" :").discard(),
@@ -325,8 +325,8 @@ fn parse_message(comptime msg_type: IrcMessageType) mecha.Parser(IrcServerMessag
     return parser.map(toTaggedStruct(IrcServerMessage, msg_type));
 }
 
-pub const privmsg = parse_message(IrcMessageType.privmsg);
-pub const notice = parse_message(IrcMessageType.notice);
+pub const privmsg = parse_message(IrcMessageType.privmsg, irc_user.asStr());
+pub const notice = parse_message(IrcMessageType.notice, mecha.oneOf(.{ irc_user.asStr(), host }));
 
 const parse_opt_message = mecha.combine(.{
     mecha.string(" :").discard(),
