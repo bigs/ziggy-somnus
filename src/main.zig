@@ -101,6 +101,30 @@ fn read_loop(reader: net.Stream.Reader, buffer_ring: *LineBufferRing(16)) !void 
     }
 }
 
+const Args = struct {
+    host: []const u8,
+    port: u16,
+};
+
+const Error = error{InvalidArgs};
+
+const ParseArgsError = Error || std.fmt.ParseIntError || std.process.ArgIterator.InitError;
+
+fn parse_args(allocator: std.mem.Allocator) ParseArgsError!Args {
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
+
+    if (!args.skip()) {
+        return Error.InvalidArgs;
+    }
+
+    const host = args.next() orelse return Error.InvalidArgs;
+    const port_string = args.next() orelse return Error.InvalidArgs;
+    const port = try std.fmt.parseUnsigned(u16, port_string, 10);
+
+    return Args{ .host = host, .port = port };
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator: std.mem.Allocator = gpa.allocator();
@@ -112,8 +136,10 @@ pub fn main() !void {
     }
     const spawn_config = std.Thread.SpawnConfig{ .allocator = allocator };
     const buffer_ring = try LineBufferRing(16).init(allocator);
+    defer buffer_ring.deinit();
 
-    const stream = try net.tcpConnectToHost(allocator, "faceroar.ijkl.me", 6667);
+    const args = try parse_args(allocator);
+    const stream = try net.tcpConnectToHost(allocator, args.host, args.port);
     const read_thread = try std.Thread.spawn(spawn_config, read_loop, .{ stream.reader(), buffer_ring });
     while (true) {
         if (buffer_ring.consume()) |buf| {
