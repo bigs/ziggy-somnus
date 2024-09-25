@@ -7,7 +7,7 @@ const builtin = std.builtin;
 const testing = std.testing;
 
 fn LineBuffer(comptime n: usize) type {
-    return struct { buf: [n]u8 = undefined, len: u16 = 0, mut: std.Thread.Mutex = .{} };
+    return struct { buf: [n]u8 = undefined, len: usize = 0, mut: std.Thread.Mutex = .{} };
 }
 
 // SPSC Ring Buffer
@@ -61,7 +61,6 @@ fn LineBufferRing(comptime n: usize) type {
             if (!self.bufs[head].mut.tryLock()) {
                 return null;
             }
-            self.head.store(next, .release);
             if (self.head.cmpxchgStrong(head, next, .acq_rel, .acquire)) |_| {
                 self.bufs[head].mut.unlock();
                 return null;
@@ -83,24 +82,47 @@ test "LineBuffer" {
     try testing.expectEqual(false, buf.?.mut.tryLock());
 }
 
-// fn read_loop(allocator: std.mem.Allocator, reader: net.Stream.Reader) !void {
-//     var buf: [512]u8 = undefined;
-
-//     while (true) {
-//         reader.readUntilDelimiter(buf: []u8, delimiter: u8)
-//         reader.streamUntilDelimiter(buf, '\n', 512);
-//     }
-// }
+fn read_loop(reader: net.Stream.Reader, buffer_ring: *LineBufferRing(16)) !void {
+    while (true) {
+        if (buffer_ring.acquire()) |buf| {
+            defer buf.mut.unlock();
+            while (true) {
+                const result = reader.readUntilDelimiter(&buf.buf, '\n');
+                const read = result catch |err| switch (err) {
+                    error.StreamTooLong => continue,
+                    else => return err,
+                };
+                buf.len = read.len;
+                break;
+            }
+        } else {
+            std.atomic.spinLoopHint();
+        }
+    }
+}
 
 pub fn main() !void {
-    const gpa = std.heap.GeneralPurposeAllocator(.{
-        .thread_safe = true,
-    }){};
-    defer gpa.deinit();
-    const allocator = gpa.allocator();
-    // const spawn_config = std.Thread.SpawnConfig{ .allocator = allocator };
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator: std.mem.Allocator = gpa.allocator();
+    defer {
+        const check = gpa.deinit();
+        if (check == .leak) {
+            @panic("Memory leak");
+        }
+    }
+    const spawn_config = std.Thread.SpawnConfig{ .allocator = allocator };
+    const buffer_ring = try LineBufferRing(16).init(allocator);
 
     const stream = try net.tcpConnectToHost(allocator, "faceroar.ijkl.me", 6667);
-    stream.close();
-    // const read_thread = try std.Thread.spawn(spawn_config, read_loop, .{ allocator, stream.reader() });
+    const read_thread = try std.Thread.spawn(spawn_config, read_loop, .{ stream.reader(), buffer_ring });
+    while (true) {
+        if (buffer_ring.consume()) |buf| {
+            defer buf.mut.unlock();
+            const line = buf.buf[0 .. buf.len - 1];
+            std.debug.print("**** {s}\n", .{line});
+        } else {
+            std.atomic.spinLoopHint();
+        }
+    }
+    read_thread.join();
 }
