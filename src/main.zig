@@ -54,15 +54,42 @@ fn read_loop(reader: net.Stream.Reader, buffer_ring: *LineBufferRing(16)) !void 
     }
 }
 
-fn irc_loop(allocator: std.mem.Allocator, writer: net.Stream.Writer, buffer_ring: *LineBufferRing(16)) !void {
+fn register(allocator: std.mem.Allocator, writer: net.Stream.Writer, buffer_ring: *LineBufferRing(16)) !void {
     const nick_string = try commands.nick(allocator, "smns");
-    std.debug.print("** Registering nick\n**** {s}", .{nick_string});
+    std.debug.print("** Registering nick\n", .{});
     defer allocator.free(nick_string);
     try writer.writeAll(nick_string);
     const user_string = try commands.user(allocator, "smns", 0, "Somnus");
-    std.debug.print("** Registering user\n**** {s}", .{user_string});
+    std.debug.print("** Registering user\n", .{});
     defer allocator.free(user_string);
     try writer.writeAll(user_string);
+
+    while (true) {
+        if (buffer_ring.consume()) |buf| {
+            defer buf.mut.unlock();
+            const line = buf.buf[0..buf.len];
+            const result: mecha.Result(parser.IrcServerMessage) = try parser.parse_irc_message.parse(allocator, line);
+            switch (result.value) {
+                .server => |server| {
+                    std.debug.print("** Server ({d:0>3}): {s}\n", .{ server.code, server.message });
+                    if (server.code == 1) break;
+                },
+                .notice => |notice| {
+                    std.debug.print("** Notice from {s}: {s}\n", .{ notice.sender, notice.message });
+                },
+                else => |val| {
+                    const tag = @tagName(val);
+                    std.debug.print("Got tag {s}\n", .{tag});
+                },
+            }
+        } else {
+            std.atomic.spinLoopHint();
+        }
+    }
+}
+
+fn irc_loop(allocator: std.mem.Allocator, writer: net.Stream.Writer, buffer_ring: *LineBufferRing(16)) !void {
+    try register(allocator, writer, buffer_ring);
 
     while (true) {
         if (buffer_ring.consume()) |buf| {
