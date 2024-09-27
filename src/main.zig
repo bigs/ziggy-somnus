@@ -3,6 +3,7 @@ const mecha = @import("mecha");
 const somnus = @import("ziggy-somnus");
 const commands = @import("commands.zig");
 const linebuffer = @import("line_buffer.zig");
+const modules = @import("modules.zig");
 const parser = somnus.parser;
 const atomic = std.atomic;
 const net = std.net;
@@ -14,6 +15,7 @@ const LineBufferRing = linebuffer.LineBufferRing;
 const Args = struct {
     host: []const u8,
     port: u16,
+    admin: []const u8,
 };
 
 const Error = error{InvalidArgs};
@@ -30,8 +32,9 @@ fn parse_args(allocator: std.mem.Allocator) ParseArgsError!Args {
     const host = args.next() orelse return Error.InvalidArgs;
     const port_string = args.next() orelse return Error.InvalidArgs;
     const port = try std.fmt.parseUnsigned(u16, port_string, 10);
+    const admin = args.next() orelse return Error.InvalidArgs;
 
-    return Args{ .host = host, .port = port };
+    return Args{ .host = host, .port = port, .admin = admin };
 }
 
 fn read_loop(reader: net.Stream.Reader, buffer_ring: *LineBufferRing(16)) !void {
@@ -88,8 +91,18 @@ fn register(allocator: std.mem.Allocator, writer: net.Stream.Writer, buffer_ring
     }
 }
 
-fn irc_loop(allocator: std.mem.Allocator, writer: net.Stream.Writer, buffer_ring: *LineBufferRing(16)) !void {
+fn irc_loop(allocator: std.mem.Allocator, args: Args, writer: net.Stream.Writer, buffer_ring: *LineBufferRing(16)) !void {
     try register(allocator, writer, buffer_ring);
+
+    var join = modules.JoinModule.init(allocator, args.admin);
+    var join_module = join.create();
+    var ping = modules.PingModule.init(allocator);
+    var ping_module = ping.create();
+
+    const mods = [_]*const modules.Module{
+        &ping_module,
+        &join_module,
+    };
 
     while (true) {
         if (buffer_ring.consume()) |buf| {
@@ -99,21 +112,10 @@ fn irc_loop(allocator: std.mem.Allocator, writer: net.Stream.Writer, buffer_ring
                 std.debug.print("** Error parsing message:\n**** {s}\n", .{line});
                 continue;
             };
-            switch (result.value) {
-                .notice => |notice| {
-                    std.debug.print("** Notice received from {s} for {s}: {s}\n", .{ notice.sender, notice.target, notice.message });
-                },
-                .server => |server| {
-                    std.debug.print("** Server ({d:0>3}): {s}\n", .{ server.code, server.message });
-                },
-                .ping => |ping| {
-                    std.debug.print("** Ping? Pong!\n", .{});
-                    const pong_message = try commands.pong(allocator, ping.message);
-                    try writer.writeAll(pong_message);
-                },
-                else => {
-                    std.debug.print("** Got some other message\n", .{});
-                },
+
+            const message = result.value;
+            for (mods) |mod| {
+                mod.process_message(&message, &writer);
             }
         } else {
             std.atomic.spinLoopHint();
@@ -137,6 +139,6 @@ pub fn main() !void {
     const args = try parse_args(allocator);
     const stream = try net.tcpConnectToHost(allocator, args.host, args.port);
     const read_thread = try std.Thread.spawn(spawn_config, read_loop, .{ stream.reader(), buffer_ring });
-    try irc_loop(allocator, stream.writer(), buffer_ring);
+    try irc_loop(allocator, args, stream.writer(), buffer_ring);
     read_thread.join();
 }
