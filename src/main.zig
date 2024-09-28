@@ -39,20 +39,17 @@ fn parse_args(allocator: std.mem.Allocator) ParseArgsError!Args {
 
 fn read_loop(reader: net.Stream.Reader, buffer_ring: *LineBufferRing(16)) !void {
     while (true) {
-        if (buffer_ring.acquire()) |buf| {
-            defer buf.mut.unlock();
-            while (true) {
-                const result = reader.readUntilDelimiter(&buf.buf, '\n');
-                const read = result catch |err| switch (err) {
-                    error.StreamTooLong => continue,
-                    else => return err,
-                };
-                // Add an extra byte for the delimiter
-                buf.len = @min(read.len + 1, 512);
-                break;
-            }
-        } else {
-            std.atomic.spinLoopHint();
+        const buf = buffer_ring.acquire();
+        defer buf.mut.unlock();
+        while (true) {
+            const result = reader.readUntilDelimiter(&buf.buf, '\n');
+            const read = result catch |err| switch (err) {
+                error.StreamTooLong => continue,
+                else => return err,
+            };
+            // Add an extra byte for the delimiter
+            buf.len = @min(read.len + 1, 512);
+            break;
         }
     }
 }
@@ -68,25 +65,22 @@ fn register(allocator: std.mem.Allocator, writer: net.Stream.Writer, buffer_ring
     try writer.writeAll(user_string);
 
     while (true) {
-        if (buffer_ring.consume()) |buf| {
-            defer buf.mut.unlock();
-            const line = buf.buf[0..buf.len];
-            const result: mecha.Result(parser.IrcServerMessage) = try parser.parse_irc_message.parse(allocator, line);
-            switch (result.value) {
-                .server => |server| {
-                    std.debug.print("** Server ({d:0>3}): {s}\n", .{ server.code, server.message });
-                    if (server.code == 1) break;
-                },
-                .notice => |notice| {
-                    std.debug.print("** Notice from {s}: {s}\n", .{ notice.sender, notice.message });
-                },
-                else => |val| {
-                    const tag = @tagName(val);
-                    std.debug.print("Got tag {s}\n", .{tag});
-                },
-            }
-        } else {
-            std.atomic.spinLoopHint();
+        const buf = buffer_ring.consume();
+        defer buf.mut.unlock();
+        const line = buf.buf[0..buf.len];
+        const result: mecha.Result(parser.IrcServerMessage) = try parser.parse_irc_message.parse(allocator, line);
+        switch (result.value) {
+            .server => |server| {
+                std.debug.print("** Server ({d:0>3}): {s}\n", .{ server.code, server.message });
+                if (server.code == 1) break;
+            },
+            .notice => |notice| {
+                std.debug.print("** Notice from {s}: {s}\n", .{ notice.sender, notice.message });
+            },
+            else => |val| {
+                const tag = @tagName(val);
+                std.debug.print("Got tag {s}\n", .{tag});
+            },
         }
     }
 }
@@ -105,20 +99,17 @@ fn irc_loop(allocator: std.mem.Allocator, args: Args, writer: net.Stream.Writer,
     };
 
     while (true) {
-        if (buffer_ring.consume()) |buf| {
-            defer buf.mut.unlock();
-            const line = buf.buf[0..buf.len];
-            const result = parser.parse_irc_message.parse(allocator, line) catch {
-                std.debug.print("** Error parsing message:\n**** {s}\n", .{line});
-                continue;
-            };
+        const buf = buffer_ring.consume();
+        defer buf.mut.unlock();
+        const line = buf.buf[0..buf.len];
+        const result = parser.parse_irc_message.parse(allocator, line) catch {
+            std.debug.print("** Error parsing message:\n**** {s}\n", .{line});
+            continue;
+        };
 
-            const message = result.value;
-            for (mods) |mod| {
-                mod.process_message(&message, &writer);
-            }
-        } else {
-            std.atomic.spinLoopHint();
+        const message = result.value;
+        for (mods) |mod| {
+            mod.process_message(&message, &writer);
         }
     }
 }
